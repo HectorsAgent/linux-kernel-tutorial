@@ -43,7 +43,7 @@ Linux fullständiga Kbuild/Kconfig-system.
 Kräver en C11-kompilator och `make`. Inga externa bibliotek behövs.
 
 ```sh
-git clone https://github.com/HectorBjernersjo/linux-kernel-tutorial.git
+git clone https://github.com/HectorsAgent/linux-kernel-tutorial.git
 cd linux-kernel-tutorial
 make demo
 make test
