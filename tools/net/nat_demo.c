@@ -8,6 +8,7 @@
 int main(void)
 {
 	struct net container, host, server;
+	struct task_struct client_process, server_process;
 	const u8 cmac[6] = {2, 0, 0, 0, 0, 2};
 	const u8 lmac[6] = {2, 0, 0, 0, 0, 1};
 	const u8 wmac[6] = {2, 0, 0, 0, 1, 1};
@@ -17,6 +18,7 @@ int main(void)
 	struct sock *client, *service;
 	char buf[32] = {0};
 	int result;
+	int client_fd, server_fd;
 	size_t received;
 
 	net_init(&container, "container");
@@ -59,16 +61,29 @@ int main(void)
 	client = tcp_socket(&container, ceth->address, 50000, seth->address, 443);
 	service = tcp_socket(&server, seth->address, 443, wan->address, 50000);
 	assert(client && service);
+	result = task_init(&client_process, 100, "client", &container);
+	assert(result == 0);
+	if (result < 0)
+		return 1;
+	result = task_init(&server_process, 200, "server", &server);
+	assert(result == 0);
+	if (result < 0) {
+		task_cleanup(&client_process);
+		return 1;
+	}
+	client_fd = task_install_socket(&client_process, client);
+	server_fd = task_install_socket(&server_process, service);
+	assert(client_fd >= 0 && server_fd >= 0);
 
 	puts("\n=== Containern skickar; hosten forwardar och gör SNAT ===");
-	result = tcp_sendmsg(client, "hej", 3);
+	result = tutorial_send(&client_process, client_fd, "hej", 3, 0);
 	assert(result == 3);
 	received = tcp_recvmsg(service, buf, sizeof(buf));
 	assert(received == 3);
 	assert(memcmp(buf, "hej", 3) == 0);
 
 	puts("\n=== Servern svarar; hosten återställer destinationen FÖRE routing ===");
-	result = tcp_sendmsg(service, "svar", 4);
+	result = tutorial_send(&server_process, server_fd, "svar", 4, 0);
 	assert(result == 4);
 	memset(buf, 0, sizeof(buf));
 	received = tcp_recvmsg(client, buf, sizeof(buf));
@@ -86,6 +101,8 @@ int main(void)
 	(void)result;
 	(void)received;
 
+	task_cleanup(&client_process);
+	task_cleanup(&server_process);
 	net_cleanup(&container);
 	net_cleanup(&host);
 	net_cleanup(&server);

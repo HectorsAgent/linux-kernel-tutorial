@@ -3,6 +3,11 @@
 #include <net/tcp.h>
 #include <tutorial/trace.h>
 
+const struct proto tcp_prot = {
+	.name = "TCP",
+	.sendmsg = tcp_sendmsg
+};
+
 int tcp_v4_rcv(struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb->dev);

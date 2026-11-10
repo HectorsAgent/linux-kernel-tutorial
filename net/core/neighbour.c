@@ -36,6 +36,7 @@ int neigh_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 		if (n->dev == dev && n->primary_key == next_hop) {
 			memcpy(skb->eth.h_source, dev->dev_addr, 6);
 			memcpy(skb->eth.h_dest, n->ha, 6);
+			skb->eth.h_proto = ETH_P_IP;
 			return dev_queue_xmit(skb);
 		}
 	}

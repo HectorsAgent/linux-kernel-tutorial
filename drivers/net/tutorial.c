@@ -11,6 +11,7 @@ static int ethernet_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	if (dev->tx_count == 32)
 		return drop_skb(dev_net(dev), skb, "tx: full utkorg");
+	trace_skb(dev_net(dev), "ethernet_xmit (kabel)", skb);
 	dev->tx_queue[dev->tx_count++] = skb;
 	return 0;
 }

@@ -13,12 +13,17 @@ nätverkssockets och ändrar inga regler eller interface på datorn. Kräver bar
 ```sh
 # Kör från repots rot:
 make demo
+make nat-demo
 make test
 ```
 
 `make` bygger även `build/liblearnnet.a`.
 
-Demot har en container, en host som router och en simulerad extern server.
+`make demo` börjar i en process som skickar `"hej"` med ett FD-nummer och slutar
+vid en färdig Ethernet-frame i den simulerade drivrutinens utkorg. Det finns
+ingen mottagare i det första demot: slutpunkten är "ut på kabeln".
+
+`make nat-demo` har en container, en host som router och en simulerad extern server.
 Containern skickar `hej` till servern och får `svar` tillbaka. Bara hosten har
 conntrack/NAT. Alla namespaces skriver ut funktionerna och hooks som paketet
 passerar, inklusive adresser, portar och TTL efter översättningar.
@@ -30,19 +35,38 @@ externa länken för att vi ska slippa ytterligare en router. Adresserna
 
 ## Börja läsa här
 
-1. [net/ipv4/ip_output.c](../../net/ipv4/ip_output.c): motsvarigheten till din
-   `send_ip()`, nu uppdelad i Linux funktioner. Börja längst ned med
-   `ip_queue_xmit()`, följ sedan `ip_local_out()` och `ip_output()`.
-2. [net/ipv4/ip_input.c](../../net/ipv4/ip_input.c): börja med `ip_rcv()` längst ned.
-   Efter PREROUTING hittar routingen nästa funktion genom `dst_input()`.
-3. [net/ipv4/route.c](../../net/ipv4/route.c): `local` före `main`, längsta prefix,
-   samt hur en route får `ip_local_deliver` eller `ip_forward` som fortsättning.
-4. [net/ipv4/ip_forward.c](../../net/ipv4/ip_forward.c): vidarebefordran och TTL.
-   Notera att funktionen aldrig bygger en ny IP-header eller anropar TCP.
-5. [net/netfilter/core.c](../../net/netfilter/core.c): våra "middlewares".
-   `NF_HOOK()` skapar kontexten, `nf_hook_slow()` kör funktionerna i
-   prioritetsordning och sedan körs `okfn()` om alla accepterade.
-6. [tools/net/nat_demo.c](../../tools/net/nat_demo.c): topologi och regelkonfiguration.
+Följ **en funktion per steg**. Konfigurationen före sändningen är labbstöd och
+kan lämnas till senare; anslutning och neighbor-post finns redan när vi börjar.
+
+1. [tools/net/send_demo.c](../../tools/net/send_demo.c): anropet till
+   `tutorial_send(&process, fd, "hej", 3, 0)`. Detta ersätter libc och CPU:ns
+   syscall-inträde och väljer vilken process som är `current` i simuleringen.
+2. [net/socket.c](../../net/socket.c): `__sys_sendto()` får FD-numret och
+   beskriver databufferten med `import_ubuf()`. Ingen paketbuffer finns ännu.
+3. [fs/file.c](../../fs/file.c): `fdget()` / `fget()` hittar filobjektet i
+   `current->files->fdt`. `fdput()` släpper den tillfälliga referensen efteråt.
+4. [net/socket.c](../../net/socket.c): `sock_from_file()` hittar `struct socket`.
+   `sock_sendmsg()` anropar `socket->ops->sendmsg`, alltså socketfamiljens kod.
+5. [net/ipv4/af_inet.c](../../net/ipv4/af_inet.c): `inet_sendmsg()` anropar
+   `sock->sk_prot->sendmsg`, som för denna anslutning pekar på `tcp_sendmsg()`.
+6. [net/ipv4/tcp.c](../../net/ipv4/tcp.c): `tcp_sendmsg()` kopierar bytes från
+   `msghdr.msg_iter` till TCP-socketens send-buffer med `copy_from_iter()`.
+7. [net/ipv4/tcp_output.c](../../net/ipv4/tcp_output.c): `tcp_write_xmit()`
+   delar upp datan i segment och skapar `sk_buff` med TCP-header och payload.
+8. [net/ipv4/ip_output.c](../../net/ipv4/ip_output.c): `ip_queue_xmit()`
+   lägger till IP-headern och routar. `ip_local_out()` kör OUTPUT och
+   `ip_output()` kör POSTROUTING.
+9. [net/core/neighbour.c](../../net/core/neighbour.c): `neigh_output()`
+   slår upp nästa hops MAC och fyller Ethernet-headern med MAC-adresser/EtherType.
+10. [net/core/dev.c](../../net/core/dev.c): `dev_queue_xmit()` anropar
+    `dev->netdev_ops->ndo_start_xmit`. I [drivers/net/tutorial.c](../../drivers/net/tutorial.c)
+    är det `ethernet_xmit()`, som placerar framen i utkorgen för "kabeln".
+
+När sändningen är bekant fortsätter vi med [ip_input.c](../../net/ipv4/ip_input.c),
+[ip_forward.c](../../net/ipv4/ip_forward.c),
+[route.c](../../net/ipv4/route.c) och [NAT-demot](../../tools/net/nat_demo.c).
+I [net/netfilter/core.c](../../net/netfilter/core.c) finns våra "middlewares":
+`NF_HOOK()` skapar kontexten och `nf_hook_slow()` kör funktionerna i prioritetsordning.
 
 Du kan vänta med nedanstående filer tills vi behöver detaljerna:
 
@@ -66,7 +90,10 @@ Du kan vänta med nedanstående filer tills vi behöver detaljerna:
 
 ## Tre paketvägar att leta efter
 
-**Lokalt skapat:** `tcp_sendmsg` → `ip_queue_xmit` → initial routing →
+**Process till TCP:** `tutorial_send` → `__sys_sendto` → `fdget` →
+`sock_from_file` → `sock_sendmsg` → `inet_sendmsg` → `tcp_sendmsg`.
+
+**Lokalt skapat paket:** `tcp_sendmsg` → `tcp_write_xmit` → `ip_queue_xmit` → initial routing →
 `ip_local_out` → OUTPUT → `dst_output` → `ip_output` → POSTROUTING →
 `ip_finish_output` → neighbor/Ethernet → `dev_queue_xmit`.
 
@@ -95,6 +122,12 @@ behöver inte dras in överallt.
 
 | Namn | Ansvar i modellen |
 | --- | --- |
+| `struct task_struct` / `current` | Processen som gör systemanropet |
+| `struct files_struct` / `fdtable` | Processens tabell från FD-nummer till filpekare |
+| `struct file` | Öppet filobjekt; en socketfil pekar på `struct socket` |
+| `struct socket` / `proto_ops` | Socketlagrets objekt och familjens operationer |
+| `struct proto` | Transportprotokollets operationer, exempelvis `tcp_prot` |
+| `struct msghdr` / `iov_iter` | Beskriver datan som ska skickas, före paketisering |
 | `struct net` | Ett network namespace: interface, routes, sockets, regler och conntrack |
 | `struct net_device` / `net_device_ops` | Interface och dess sändningsfunktion |
 | `struct sk_buff` | Paketet samt metadata som interface, route och conntrack-referens |
@@ -106,6 +139,10 @@ behöver inte dras in överallt.
 
 Samma funktionskod används av alla namespaces. Det är `dev_net(dev)` vid RX
 och `sock_net(sk)` vid lokal TX som bestämmer vilken nätverksmiljö som används.
+Processens aktuella nätverksnamespace finns i `current->nsproxy->net_ns`.
+Sändningen följer ändå socketens `sk_net`, även om processen bytt namespace
+efter att socketen skapades. FD-numret är bara ett index i processens egen tabell;
+det innehåller ingen information om nätverk eller protokoll.
 När ett paket går över veth rensas gammal route/conntrack-koppling innan peer
 tar emot det. Mottagaren gör egna uppslag i sitt namespace.
 
@@ -130,8 +167,9 @@ droppas första paketet före dess städas den tillfälliga posten bort med pake
 - IP-/transportheaders är små C-strukturer. `skb->data` innehåller bara payload.
   Inga riktiga wire-format, checksummor, header-offsets, fragment eller headroom.
   **IP-adresser och portar är i host byte order**, även i headerstrukturerna.
-- En tråd, fasta tabellstorlekar och linjära uppslag. Inga lås, RCU, refcounts,
-  per-CPU-data, trie eller delade minnesbuffertar. Structar med pekare ska inte
+- En tråd, fasta tabellstorlekar och linjära uppslag. `struct file` har enkel
+  referensräkning för `fget`/`fput`. Inga lås, RCU, atomics, nätverksobjekts-
+  refcounts, per-CPU-data, trie eller delade paketbuffertar. Structar med pekare ska inte
   kopieras eller flyttas efter konfiguration.
 - TCP-sockets skapas redan anslutna. Ingen listen/accept, handshake, ACK,
   omsändning, congestion control, stängning eller sekvensnummer-wrap. Små
@@ -150,17 +188,38 @@ droppas första paketet före dess städas den tillfälliga posten bort med pake
 - Grannar förkonfigureras i stället för ARP. En adress per interface, vanlig
   unicast-routing och inga policyregler utöver local/main. Ingen bridge,
   VLAN, tunnel eller VRF. Veth/loopback anropar RX synkront utan IRQ/NAPI/köer.
-- Processer, FD-tabeller och syscall-lagret är utanför detta bibliotek.
-  Vi börjar direkt vid en lokal socket för att hålla fokus på nätverksstacken.
+- `tutorial_send()` är en C-funktion som simulerar libc och CPU:ns syscall-entry.
+  Ingen riktig privilege transition, scheduler, fork eller virtuell minnesmodell.
+  `current` är en global pekare. Process-/FD-tabeller, filobjekt, socketobjekt och
+  familje-/protokoll-dispatch ingår. `kernel/fork.c` innehåller bara labbets
+  processkonstruktor. `socket()`, bind/connect och TCP-handshake är inte syscalls
+  i denna modell: `tcp_socket()` och `task_install_socket()` förbereder anslutningen.
+- `__sys_sendto()` stödjer anslutna sockets, flags=0 och addr=NULL. Den returnerar
+  negativa errno-värden direkt; libc:s `errno`-översättning saknas. `msghdr` har
+  bara en sammanhängande databuffer. `import_ubuf()` avvisar NULL med längd > 0,
+  men kan inte validera godtyckliga pekare eller verkliga user space-sidor.
+  Bytekopieringen sker i TCP med `copy_from_iter()`. Inga standardströmmar skapas,
+  så första FD-numret i exemplen är 0. Close frigör fil-/socketomslaget men TCP-
+  objektet ägs fortsatt av namespacet; FIN och full socketlivstid är bortvalda.
+- Receive-syscall är inte med ännu. NAT-demot läser mottagna byte direkt med
+  modellens `tcp_recvmsg()`. Den simulerade Ethernet-utkorgen är sista steget på
+  sändningssidan; inget skickas via verklig hårdvara och framen serialiseras inte.
 
 ## Verifiering
 
-`make test` kör tolv scenarier: lokal TCP över lo till en eth0-adress,
+`make test` kör tolv nätverksscenarier och sex syscall-scenarier. Nätverkstesterna:
+lokal TCP över lo till en eth0-adress,
 byteström och segmentering, segment i fel ordning, längsta-prefix-routing,
 neighbor-nyckel per interface, forwarding utan conntrack, TTL, SNAT tur/retur,
 separat conntrack i båda namespaces, brandvägg och sena conntrack-bekräftelser,
 UDP-portkollisioner och svar, bevarade NAT-mappningar efter regeländring,
 DNAT med omvänd översättning, OUTPUT-DNAT med omrouting samt tidig NF_DROP.
+
+Syscall-testerna finns i [test_syscall.c](../../tools/testing/selftests/net/test_syscall.c).
+De följer byte från FD till Ethernet, provar samma FD-nummer i olika processer,
+felaktiga FD:n, fil som inte är en socket, NULL-buffer, osupporterade flaggor,
+nollängdssändning, socketens namespace efter processens namespace-byte, dispatch
+genom `sk_prot`, filreferensens livstid över close, segmentering och full FD-tabell.
 
 Minneskontroll med GCC/Clang:
 
@@ -170,12 +229,15 @@ make BUILD=build-asan CFLAGS='-std=c11 -Wall -Wextra -Werror -Wpedantic -g -O1 -
 
 ## Motsvarande riktiga kod, när vi vill jämföra
 
+- [net/socket.c](https://codebrowser.dev/linux/linux/net/socket.c.html)
+- [af_inet.c](https://codebrowser.dev/linux/linux/net/ipv4/af_inet.c.html)
+- [fs/file.c](https://codebrowser.dev/linux/linux/fs/file.c.html)
 - [ip_input.c](https://codebrowser.dev/linux/linux/net/ipv4/ip_input.c.html)
 - [ip_output.c](https://codebrowser.dev/linux/linux/net/ipv4/ip_output.c.html)
 - [ip_forward.c](https://codebrowser.dev/linux/linux/net/ipv4/ip_forward.c.html)
 - [Netfilters hook-objekt](https://codebrowser.dev/linux/linux/include/linux/netfilter.h.html)
 - [Netfilters hook-flöden och prioriteter](https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks)
 
-Vårt nästa designsteg kan tas direkt i `ip_output.c`: där syns varför OUTPUT
-och POSTROUTING är två olika punkter, och varför forwarding bara passerar den
-senare av dem.
+Vår gemensamma genomgång börjar vid `tutorial_send()` i `tools/net/send_demo.c`.
+Första kernelsteget att läsa är `__sys_sendto()` i `net/socket.c`. Vi följer en
+enda funktionsövergång åt gången och förklarar namn och objekt när de dyker upp.

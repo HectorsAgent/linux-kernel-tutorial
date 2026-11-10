@@ -5,6 +5,7 @@
 #include <tutorial/limits.h>
 
 struct sk_buff;
+extern const struct proto tcp_prot;
 
 struct tcp_sock {
 	/* Linux har fler mellanlager: inet_connection_sock och inet_sock. */
@@ -25,7 +26,7 @@ static inline struct tcp_sock *tcp_sk(struct sock *sk)
 /* Labbet förskapar anslutna sockets utan handshake. */
 struct sock *tcp_socket(struct net *net, u32 local_ip, u16 local_port,
 	u32 remote_ip, u16 remote_port);
-int tcp_sendmsg(struct sock *sk, const void *data, size_t len);
+int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);
 size_t tcp_recvmsg(struct sock *sk, void *data, size_t len);
 int tcp_write_xmit(struct sock *sk);
 int tcp_v4_rcv(struct sk_buff *skb);

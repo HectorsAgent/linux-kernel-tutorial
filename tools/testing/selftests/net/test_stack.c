@@ -1,6 +1,13 @@
 #include <linux/skbuff.h>
 #include <net/net_namespace.h>
 #include <tutorial/lab.h>
+#include <linux/net.h>
+#include <linux/fs.h>
+#include <linux/fdtable.h>
+#include <linux/nsproxy.h>
+#include <linux/syscalls.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +15,16 @@
 /* Inga nätverksrättigheter, riktiga sockets eller nätverksinterface används. */
 static const u8 mac_a[6] = {2, 0, 0, 0, 0, 1};
 static const u8 mac_b[6] = {2, 0, 0, 0, 0, 2};
+
+/* Lågnivåtesterna börjar fortfarande vid TCP, utan process/syscall. */
+static int send_tcp(struct sock *sk, const void *data, size_t len)
+{
+	struct msghdr msg = {0};
+	int result = import_ubuf(data, len, &msg.msg_iter);
+
+	return result < 0 ? result : tcp_sendmsg(sk, &msg, len);
+}
+
 
 static struct sk_buff *packet(u32 src, u16 sport, u32 dst, u16 dport, u8 proto)
 {
@@ -40,8 +57,8 @@ static void test_local_tcp_and_loopback(void)
 	a = tcp_socket(&net, eth->address, 5000, eth->address, 80);
 	b = tcp_socket(&net, eth->address, 80, eth->address, 5000);
 	assert(a && b);
-	assert(tcp_sendmsg(a, "ab", 2) == 2);
-	assert(tcp_sendmsg(a, "cd", 2) == 2);
+	assert(send_tcp(a, "ab", 2) == 2);
+	assert(send_tcp(a, "cd", 2) == 2);
 	/* Två sendmsg blir en byteström, inte två meddelanden. */
 	assert(tcp_recvmsg(b, text, 3) == 3);
 	assert(memcmp(text, "abc", 3) == 0);
@@ -71,7 +88,7 @@ static void test_routing_and_neighbour_scope(void)
 	neigh_add(a, IP4(10, 0, 0, 254), mac_a);
 	neigh_add(b, IP4(10, 0, 0, 254), mac_b);
 	sk = tcp_socket(&net, a->address, 5000, IP4(8, 8, 8, 8), 80);
-	assert(sk && tcp_sendmsg(sk, "x", 1) == 1);
+	assert(sk && send_tcp(sk, "x", 1) == 1);
 	skb = netdev_dequeue(b);
 	assert(skb && !netdev_dequeue(a));
 	assert(memcmp(skb->eth.h_dest, mac_b, 6) == 0);
@@ -156,10 +173,10 @@ static void test_snat_round_trip(bool container_tracking)
 	char text[16] = {0};
 
 	lab_init(&lab, container_tracking);
-	assert(tcp_sendmsg(lab.client, "request", 7) == 7);
+	assert(send_tcp(lab.client, "request", 7) == 7);
 	assert(tcp_recvmsg(lab.service, text, sizeof(text)) == 7);
 	assert(memcmp(text, "request", 7) == 0);
-	assert(tcp_sendmsg(lab.service, "reply", 5) == 5);
+	assert(send_tcp(lab.service, "reply", 5) == 5);
 	assert(tcp_recvmsg(lab.client, text, sizeof(text)) == 5);
 	assert(memcmp(text, "reply", 5) == 0);
 	assert(lab.host.ct.count == 1 && lab.server.ct.count == 0);
@@ -196,8 +213,8 @@ static void test_stateful_firewall_and_confirmation(void)
 	/* Ny anslutning från utsidan till containern får inte skapa en sparad post. */
 	skb = packet(lab.seth->address, 9999, lab.ceth->address, 8080, IPPROTO_TCP);
 	assert(inject(lab.wan, skb) < 0 && lab.host.ct.count == 0);
-	assert(tcp_sendmsg(lab.client, "x", 1) == 1);
-	assert(tcp_sendmsg(lab.service, "y", 1) == 1);
+	assert(send_tcp(lab.client, "x", 1) == 1);
+	assert(send_tcp(lab.service, "y", 1) == 1);
 	assert(lab.host.ct.count == 1 && lab.host.drops == 1);
 	lab_cleanup(&lab);
 }
@@ -269,9 +286,9 @@ static void test_dnat_and_reverse_translation(void)
 		.match = { .daddr = lab.wan->address, .daddr_len = 32, .dport = 8080 },
 		.action = NFT_DNAT, .nat_addr = lab.ceth->address, .nat_port = 80
 	});
-	assert(tcp_sendmsg(client, "req", 3) == 3);
+	assert(send_tcp(client, "req", 3) == 3);
 	assert(tcp_recvmsg(backend, text, sizeof(text)) == 3);
-	assert(tcp_sendmsg(backend, "res", 3) == 3);
+	assert(send_tcp(backend, "res", 3) == 3);
 	assert(tcp_recvmsg(client, text, sizeof(text)) == 3);
 	assert(memcmp(text, "res", 3) == 0);
 	assert(lab.wan->last_tx_iph.saddr == lab.wan->address);
@@ -298,10 +315,10 @@ static void test_output_dnat_reroutes_to_local(void)
 	});
 	a = tcp_socket(&net, eth->address, 5000, IP4(10, 0, 0, 99), 80);
 	b = tcp_socket(&net, eth->address, 8080, eth->address, 5000);
-	assert(a && b && tcp_sendmsg(a, "x", 1) == 1);
+	assert(a && b && send_tcp(a, "x", 1) == 1);
 	assert(tcp_recvmsg(b, text, sizeof(text)) == 1);
 	assert(eth->tx_packets == 0 && net.loopback_dev->tx_packets == 1);
-	assert(tcp_sendmsg(b, "y", 1) == 1);
+	assert(send_tcp(b, "y", 1) == 1);
 	assert(tcp_recvmsg(a, text, sizeof(text)) == 1 && text[0] == 'y');
 	assert(net.ct.count == 1 && net.hook_hits[NF_INET_FORWARD] == 0);
 	net_cleanup(&net);
@@ -374,7 +391,7 @@ static void test_packetization_preserves_byte_stream(void)
 	a = tcp_socket(&net, local, 5000, local, 80);
 	b = tcp_socket(&net, local, 80, local, 5000);
 	memset(sent, 'x', sizeof(sent));
-	assert(a && b && tcp_sendmsg(a, sent, sizeof(sent)) == (int)sizeof(sent));
+	assert(a && b && send_tcp(a, sent, sizeof(sent)) == (int)sizeof(sent));
 	assert(tcp_recvmsg(b, received, sizeof(received)) == sizeof(received));
 	assert(memcmp(sent, received, sizeof(sent)) == 0);
 	assert(net.loopback_dev->tx_packets == 3);

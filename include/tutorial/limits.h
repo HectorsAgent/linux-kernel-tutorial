@@ -9,6 +9,7 @@
 #define MAX_ROUTES 32
 #define MAX_NEIGH 32
 #define MAX_SOCKS 8
+#define MAX_FDS 16
 #define MAX_CT 32
 #define MAX_HOOKS 8
 #define MAX_RULES 16
